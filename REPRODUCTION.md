@@ -118,3 +118,31 @@ make
 ```bash
 omnetpp
 ```
+
+# The experiments parameters
+
+**All experiments use:**
+- 10 nodes
+- 1000 transactions
+
+## 1. Generate a scale-free topology with Lightning channel statistics:
+```bash
+python3 generate_topology_workload.py genTopo -t scale-free -n 10 --lightning
+```
+
+## 2. Generate workloads:
+
+**a) Fixed payment value (200):**
+```bash
+python3 generate_topology_workload.py genWork --n_payments 1000 --min_payment 200 --max_payment 200
+```
+
+**b) Fixed payment value (10):**
+```bash
+python3 generate_topology_workload.py genWork --n_payments 1000 --min_payment 10 --max_payment 10
+```
+
+**c) Realistic payment values from credit card dataset:**
+```bash
+python3 generate_topology_workload.py genWork --n_payments 1000 --credit_card
+```

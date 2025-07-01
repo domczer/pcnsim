@@ -349,6 +349,9 @@ std::vector<std::string> FullNode::dijkstraWeightedShortestPath (std::string src
             double linkQuality = weightVector[2];
 
             // Define weight as a combination of parameters in the weightVector
+
+            //fee or cap routing mechanism
+            // double linkWeight = fee;
             double linkWeight = 1/capacity;
 
             if (!visited[neighbor]) {
