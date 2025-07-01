@@ -37,6 +37,43 @@ def generate_topology (topology, nodes, alpha, beta, gamma, k, p, m, lightning):
         print ('Setting m to ' + str(m))
         graph = generate_barabasi_albert(nodes, m) 
 
+    # --- Define the victim with highest degree ---
+    degrees = graph.degree()
+    hub_node = max(degrees, key=lambda x: x[1])[0]  # node with max degree
+    print(f"Hub node (highest degree): {hub_node}")
+    # -------------------------------
+
+    # --- Attacker node ---
+    attacker_id = max(graph.nodes()) + 1
+    graph.add_node(attacker_id)
+    print(f"Added attacker node: {attacker_id}")
+    # ------------------------------
+
+    # --- Connect attacker to hub and hub's largest neighbor ---
+    # Find hub's neighbor with largest channel (by edge 'capacity' attribute if present, else by degree)
+    neighbors = list(graph.neighbors(hub_node))
+    max_neighbor = None
+    max_capacity = -1
+
+    for neighbor in neighbors:
+        # Try to get 'capacity' attribute, else fallback to degree
+        if graph.has_edge(hub_node, neighbor):
+            capacity = graph[hub_node][neighbor].get('capacity', 1)
+            if capacity > max_capacity:
+                max_capacity = capacity
+                max_neighbor = neighbor
+
+    if max_neighbor is None and neighbors:
+        max_neighbor = neighbors[0]  # fallback
+
+    print(f"Connecting attacker to hub {hub_node} and hub's max neighbor {max_neighbor}")
+
+    # Add edges from attacker to hub and to the selected neighbor
+    graph.add_edge(attacker_id, hub_node, capacity=max_capacity)
+    if max_neighbor is not None:
+        graph.add_edge(attacker_id, max_neighbor, capacity=max_capacity)
+    # ------------------------------
+
     graph = adjust_edges(graph)
     initialize_attributes(graph, lightning, True if topology == 'scale-free' else False)
 
