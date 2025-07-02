@@ -44,7 +44,7 @@ def generate_topology (topology, nodes, alpha, beta, gamma, k, p, m, lightning):
     # -------------------------------
 
     # --- Attacker node ---
-    attacker_id = max(graph.nodes()) + 1
+    attacker_id = -1
     graph.add_node(attacker_id)
     print(f"Added attacker node: {attacker_id}")
     # ------------------------------

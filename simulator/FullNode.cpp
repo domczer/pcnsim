@@ -29,6 +29,7 @@ class FullNode : public cSimpleModule {
         virtual std::vector<std::string> getPath(std::map<std::string, std::string> parents, std::string target);
         virtual std::string minDistanceNode (std::map<std::string, double> distances, std::map<std::string, bool> visited);
         virtual std::vector<std::string> dijkstraWeightedShortestPath (std::string src, std::string target, std::map<std::string, std::vector<std::pair<std::string, std::vector<double> > > > graph);
+        virtual std::vector<std::string> attackerCongestionRoute();
 
         // Message handlers
         virtual void initHandler (BaseMessage *baseMsg);
@@ -97,6 +98,39 @@ void FullNode::initialize() {
     this->localCommitCounter = 0;
     std::string myName = getName();
     std::map<std::string, std::vector<std::tuple<std::string, double, simtime_t>>> localPendingPayments = pendingPayments;
+
+    if (myName == "node-1") {
+    // Get the attack route
+    std::vector<std::string> attackRoute = attackerCongestionRoute();
+    if (attackRoute.size() < 2) {
+        EV << "Attacker route is too short.\n";
+    } else {
+        std::string firstHop = attackRoute[1];
+        // Get max concurrent HTLCs for the attacker's channel to firstHop
+        int maxHTLCs = 30; // fallback
+        if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
+            maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
+        }
+        double value = 1.0; // minimal value for congestion
+        for (int i = 0; i < maxHTLCs; ++i) {
+            char msgname[100];
+            sprintf(msgname, "%s-attack-%d", myName.c_str(), i);
+            Payment *trMsg = new Payment(msgname);
+            trMsg->setSource(myName.c_str());
+            trMsg->setDestination(attackRoute.back().c_str());
+            trMsg->setValue(value);
+            trMsg->setHopCount(0);
+
+            BaseMessage *baseMsg = new BaseMessage();
+            baseMsg->setMessageType(TRANSACTION_INIT);
+            baseMsg->setHopCount(0);
+            baseMsg->encapsulate(trMsg);
+            scheduleAt(simTime() +3000, baseMsg);
+            _isFirstSelfMessage = true;
+        }
+        EV << "Attacker sent " << maxHTLCs << " payments for congestion attack.\n";
+      }
+    }
 
     // Initialize payment channels
     for (auto& neighborToPCs : nameToPCs[myName]) {
@@ -362,6 +396,49 @@ std::vector<std::string> FullNode::dijkstraWeightedShortestPath (std::string src
     return getPath(parents, target);
 }
 
+std::vector<std::string> FullNode::attackerCongestionRoute() {
+    std::string attackerName = "node-1";
+    std::vector<std::string> hubCandidates;
+
+    // Find the two nodes with the highest degree (excluding attacker)
+    int maxDegree1 = -1, maxDegree2 = -1;
+    std::string hub1 = "", hub2 = "";
+
+    for (int i = 0; i < globalTopology->getNumNodes(); ++i) {
+        cModule* mod = globalTopology->getNode(i)->getModule();
+        std::string nodeName = mod->getName();
+        if (nodeName == attackerName) continue;
+        int degree = globalTopology->getNode(i)->getNumInLinks() + globalTopology->getNode(i)->getNumOutLinks();
+        if (degree > maxDegree1) {
+            maxDegree2 = maxDegree1;
+            hub2 = hub1;
+            maxDegree1 = degree;
+            hub1 = nodeName;
+        } else if (degree > maxDegree2) {
+            maxDegree2 = degree;
+            hub2 = nodeName;
+        }
+    }
+
+    if (hub1 == "" || hub2 == "") {
+        EV << "Could not find two hubs for attacker route.\n";
+        return {};
+    }
+
+    // Build the attack route: attacker -> hub1 -> hub2 -> attacker
+    std::vector<std::string> route;
+    route.push_back(attackerName);
+    route.push_back(hub1);
+    route.push_back(hub2);
+    route.push_back(attackerName);
+
+    EV << "Constructed attacker congestion route: ";
+    for (auto& n : route) EV << n << " ";
+    EV << "\n";
+
+    return route;
+}
+
 
 /***********************************************************************************************************************/
 /* MESSAGE HANDLERS                                                                                                    */
@@ -372,10 +449,58 @@ void FullNode::initHandler (BaseMessage *baseMsg) {
     Payment *initMsg = check_and_cast<Payment *> (baseMsg->decapsulate());
     EV << "TRANSACTION_INIT received. Starting payment "<< initMsg->getName() << "\n";
 
-    // Create ephemeral communication channel with the payment source
+    std::string myName = getName();
     std::string srcName = initMsg->getSource();
     std::string srcPath = "PCN." + srcName;
     double value = initMsg->getValue();
+
+    // Attacker behavior: initialize max_concurrent_number of HTLCs and do not reveal preimage
+    if (myName == "node-1") {
+        // Get the attack route
+        std::vector<std::string> attackRoute = attackerCongestionRoute();
+        if (attackRoute.size() < 2) {
+            EV << "Attacker route is too short.\n";
+            return;
+        }
+        std::string firstHop = attackRoute[1];
+        int maxHTLCs = 30; // fallback
+        // if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
+        //     maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
+        // }
+        EV << "Attacker initializing " << maxHTLCs << " unresolved HTLCs.\n";
+        for (int i = 0; i < maxHTLCs; ++i) {
+            // Generate a unique preimage and hash for each HTLC, but do not store preimage for fulfillment
+            std::string preImage = generatePreImage();
+            std::string preImageHash = sha256(preImage);
+
+            // Create ephemeral communication channel with the payment source (self)
+            cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
+            cGate* srcGate = this->getOrCreateFirstUnconnectedGate("in", 0, false, true);
+            cDelayChannel *tmpChannel = cDelayChannel::create("tmpChannel");
+            tmpChannel->setDelay(100);
+            myGate->connectTo(srcGate, tmpChannel);
+
+            // Create invoice and send it to the payment source (self)
+            Invoice *invMsg = new Invoice();
+            invMsg->setSource(myName.c_str());
+            invMsg->setDestination(attackRoute.back().c_str());
+            invMsg->setValue(value);
+            invMsg->setPaymentHash(preImageHash.c_str());
+
+            BaseMessage *invoiceMsg = new BaseMessage();
+            invoiceMsg->setMessageType(INVOICE);
+            invoiceMsg->encapsulate(invMsg);
+            invoiceMsg->setName("INVOICE");
+            send(invoiceMsg, myGate);
+
+            // Close ephemeral connection
+            myGate->disconnect();
+        }
+        return; // Do not proceed with normal behavior
+    }
+
+    // Normal node behavior
+    // Create ephemeral communication channel with the payment source
     cModule* srcMod = getModuleByPath(srcPath.c_str());
     cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
     cGate* srcGate = srcMod->getOrCreateFirstUnconnectedGate("in", 0, false, true);
@@ -406,28 +531,34 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
     std::string htlcId = createHTLCId(paymentHash, htlcType);
     double value = invMsg->getValue();
 
-    // Find route to destination
-    std::vector<std::string> path = this->dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+    // Use attackerCongestionRoute if this node is the attacker
+    std::vector<std::string> path;
+    if (myName == "node-1") {
+        path = this->attackerCongestionRoute();
+        EV << "Attacker using congestion route.\n";
+    } else {
+        path = this->dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+    }
     std::string firstHop = path[1];
 
     // If payment is larger than our capacity in the outbound payment channel, mark is as canceled and return
-   if (!hasCapacityToForward(firstHop, value)) {
-       _myPayments[paymentHash] = "CANCELED";
-       EV << "WARNING: Canceling payment " + paymentHash + " on node " + myName + " due to insufficient funds in the first hop.\n";
+    if (!hasCapacityToForward(firstHop, value)) {
+        _myPayments[paymentHash] = "CANCELED";
+        EV << "WARNING: Canceling payment " + paymentHash + " on node " + myName + " due to insufficient funds in the first hop.\n";
 
-       _countCanceled++;
-       _paymentGoodputAll = double(_countCompleted)/double(_countCompleted + _countFailed + _countCanceled);
+        _countCanceled++;
+        _paymentGoodputAll = double(_countCompleted)/double(_countCompleted + _countFailed + _countCanceled);
 
-       emit(_signals["canceledPayments"], _countCanceled);
-       emit(_signals["paymentGoodputAll"], _paymentGoodputAll);
+        emit(_signals["canceledPayments"], _countCanceled);
+        emit(_signals["paymentGoodputAll"], _paymentGoodputAll);
 
-       return;
-   }
+        return;
+    }
 
-   // Add payment into payment list and set status = pending
-   _myPayments[paymentHash] = "PENDING";
+    // Add payment into payment list and set status = pending
+    _myPayments[paymentHash] = "PENDING";
 
-   // Print route
+    // Print route
     std::string printPath = "Full route to destination: ";
     for (auto hop: path)
         printPath = printPath + hop + ", ";
@@ -461,7 +592,6 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
     //Sending HTLC out
     EV << "Sending HTLC to " + firstHop + " with payment hash " + paymentHash + "\n";
     send(newMessage, gate);
-
 }
 
 void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
@@ -597,6 +727,10 @@ void FullNode::updateFulfillHTLCHandler (BaseMessage *baseMsg) {
 
     EV << "UPDATE_FULFILL_HTLC received at " + std::string(getName()) + " from " + std::string(baseMsg->getSenderModule()->getName()) + ".\n";
     std::string myName = getName();
+    if (myName == "node-1") {
+        EV << "Attacker withholding HTLC fulfillment for congestion attack\n";
+        return;
+    }
 
     // If the message is a self message, it means we already attempted to commit changes but failed because the batch size was insufficient. So we wait for the timeout.
     // Otherwise, we attempt to commit normally.
@@ -1438,7 +1572,7 @@ void FullNode::setInFlight(HTLC *htlc, std::string nextHop) {
 }
 
 bool FullNode::isInFlight(HTLC *htlc, std::string nextHop) {
-    // Checks if payment is already in flight
+       // Checks if payment is already in flight
 
     if(!_paymentChannels[nextHop].getInFlight(htlc->getHtlcId()))
         return false;
