@@ -29,6 +29,7 @@ class FullNode : public cSimpleModule {
         virtual std::vector<std::string> getPath(std::map<std::string, std::string> parents, std::string target);
         virtual std::string minDistanceNode (std::map<std::string, double> distances, std::map<std::string, bool> visited);
         virtual std::vector<std::string> dijkstraWeightedShortestPath (std::string src, std::string target, std::map<std::string, std::vector<std::pair<std::string, std::vector<double> > > > graph);
+        virtual std::vector<std::string> getAttackerCongestionRoute(std::string src, std::string dst);
 
         // Message handlers
         virtual void initHandler (BaseMessage *baseMsg);
@@ -160,10 +161,17 @@ void FullNode::initialize() {
          simtime_t time = std::get<2>(paymentTuple);
 
          // If this is the attacker payment, send it max_concurrent_htlc times
-         if (srcName == "node-1" && myName == "node-2") {
-             int maxHTLCs = 30; //fallback
-             if (_paymentChannels.find("node-1") != _paymentChannels.end()) {
-                 maxHTLCs = _paymentChannels["node-1"].getMaxAcceptedHTLCs();
+         if (srcName == "node-1") {
+
+             std::vector<std::string> attackRoute = getAttackerCongestionRoute(srcName, myName);
+             if (attackRoute.empty()) {
+                 EV << "Attacker route not possible, skipping attack\n";
+                 return;
+             }
+
+             int maxHTLCs = 2; //fallback
+             if (_paymentChannels.find(attackRoute[1]) != _paymentChannels.end()) {
+                  maxHTLCs = _paymentChannels[attackRoute[1]].getMaxAcceptedHTLCs();
              }
              for (int i = 0; i < maxHTLCs; ++i) {
                  char msgname[100];
@@ -178,12 +186,18 @@ void FullNode::initialize() {
                  BaseMessage *baseMsg = new BaseMessage();
                  baseMsg->setMessageType(TRANSACTION_INIT);
                  baseMsg->setHopCount(0);
+                 baseMsg->setHops(attackRoute);
 
                  baseMsg->encapsulate(trMsg);
                  scheduleAt(simTime()+i*0.1, baseMsg);
                  _isFirstSelfMessage = true;
              }
-            EV << "Attacker" << srcName << "sent " << maxHTLCs << " payments for congestion attack.\n";
+            EV << "Attacker" << srcName << "sent " << maxHTLCs << " payments for congestion attack via route: ";
+            for (const auto& node : attackRoute) {
+                EV << node << " -> ";
+            }
+            EV << "\n";
+
          } else {
              // Normal payment
              char msgname[100];
@@ -416,6 +430,41 @@ std::vector<std::string> FullNode::dijkstraWeightedShortestPath (std::string src
     return getPath(parents, target);
 }
 
+std::vector<std::string> FullNode::getAttackerCongestionRoute(std::string src, std::string dst) {
+    // Hardcoded attack route:
+    std::vector<std::string> attackRoute;
+    attackRoute.push_back(src);      // node-1
+    attackRoute.push_back("node0");
+    attackRoute.push_back("node2"); 
+    attackRoute.push_back("node0");  
+    attackRoute.push_back("node1");
+    attackRoute.push_back("node0"); 
+    attackRoute.push_back("node3");
+    attackRoute.push_back("node0"); 
+    attackRoute.push_back(dst);      // to node-2
+    
+    // Simple verification - check if each consecutive hop exists as a neighbor
+    for (size_t i = 0; i < attackRoute.size() - 1; i++) {
+        std::string currentNode = attackRoute[i];
+        std::string nextNode = attackRoute[i+1];
+        
+        // If this is our node, check if we have the next hop as neighbor
+        if (currentNode == getName()) {
+            if (_paymentChannels.find(nextNode) == _paymentChannels.end()) {
+                EV << "Warning: No channel from " << currentNode << " to " << nextNode << "\n";
+                return std::vector<std::string>();
+            }
+        }
+    }
+    
+    EV << "Attack route verified: ";
+    for (const auto& node : attackRoute) {
+        EV << node << " -> ";
+    }
+    EV << "\n";
+    
+    return attackRoute;
+}
 
 /***********************************************************************************************************************/
 /* MESSAGE HANDLERS                                                                                                    */
@@ -432,50 +481,50 @@ void FullNode::initHandler (BaseMessage *baseMsg) {
     std::string dstName = initMsg->getDestination();
     std::string srcPath = "PCN." + srcName;
     double value = initMsg->getValue();
-    // Attacker behavior: initialize max_concurrent_number of HTLCs and do not reveal preimage
-    if (myName == "node-1" && dstName == "node-2") {
-        // Get the attack route
-        std::vector<std::string> attackRoute = dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
-        if (attackRoute.size() < 2) {
-            EV << "Attacker route is too short.\n";
-            return;
-        }
-        std::string firstHop = attackRoute[1];
-        int maxHTLCs = 30; // fallback
-        if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
-            maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
-        }
-        EV << "Attacker initializing " << maxHTLCs << " unresolved HTLCs.\n";
-        for (int i = 0; i < maxHTLCs; ++i) {
-            // Generate a unique preimage and hash for each HTLC, but do not store preimage for fulfillment
-            std::string preImage = generatePreImage();
-            std::string preImageHash = sha256(preImage);
+    // // Attacker behavior: initialize max_concurrent_number of HTLCs and do not reveal preimage
+    // if (myName == "node-1" && dstName == "node-2") {
+    //     // Get the attack route
+    //     std::vector<std::string> attackRoute = dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+    //     if (attackRoute.size() < 2) {
+    //         EV << "Attacker route is too short.\n";
+    //         return;
+    //     }
+    //     std::string firstHop = attackRoute[1];
+    //     int maxHTLCs = 30; // fallback
+    //     if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
+    //         maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
+    //     }
+    //     EV << "Attacker initializing " << maxHTLCs << " unresolved HTLCs.\n";
+    //     for (int i = 0; i < maxHTLCs; ++i) {
+    //         // Generate a unique preimage and hash for each HTLC, but do not store preimage for fulfillment
+    //         std::string preImage = generatePreImage();
+    //         std::string preImageHash = sha256(preImage);
 
-            // Create ephemeral communication channel with the payment source (self)
-            cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
-            cGate* srcGate = this->getOrCreateFirstUnconnectedGate("in", 0, false, true);
-            cDelayChannel *tmpChannel = cDelayChannel::create("tmpChannel");
-            tmpChannel->setDelay(100);
-            myGate->connectTo(srcGate, tmpChannel);
+    //         // Create ephemeral communication channel with the payment source (self)
+    //         cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
+    //         cGate* srcGate = this->getOrCreateFirstUnconnectedGate("in", 0, false, true);
+    //         cDelayChannel *tmpChannel = cDelayChannel::create("tmpChannel");
+    //         tmpChannel->setDelay(100);
+    //         myGate->connectTo(srcGate, tmpChannel);
 
-            // Create invoice and send it to the payment source (self)
-            Invoice *invMsg = new Invoice();
-            invMsg->setSource(myName.c_str());
-            invMsg->setDestination(attackRoute.back().c_str());
-            invMsg->setValue(value);
-            invMsg->setPaymentHash(preImageHash.c_str());
+    //         // Create invoice and send it to the payment source (self)
+    //         Invoice *invMsg = new Invoice();
+    //         invMsg->setSource(myName.c_str());
+    //         invMsg->setDestination(attackRoute.back().c_str());
+    //         invMsg->setValue(value);
+    //         invMsg->setPaymentHash(preImageHash.c_str());
 
-            BaseMessage *invoiceMsg = new BaseMessage();
-            invoiceMsg->setMessageType(INVOICE);
-            invoiceMsg->encapsulate(invMsg);
-            invoiceMsg->setName("INVOICE");
-            send(invoiceMsg, myGate);
+    //         BaseMessage *invoiceMsg = new BaseMessage();
+    //         invoiceMsg->setMessageType(INVOICE);
+    //         invoiceMsg->encapsulate(invMsg);
+    //         invoiceMsg->setName("INVOICE");
+    //         send(invoiceMsg, myGate);
 
-            // Close ephemeral connection
-            myGate->disconnect();
-        }
-        return; // Do not proceed with normal behavior
-    }
+    //         // Close ephemeral connection
+    //         myGate->disconnect();
+    //     }
+    //     return; // Do not proceed with normal behavior
+    // }
     // Normal behavior
     cModule* srcMod = getModuleByPath(srcPath.c_str());
     cGate* myGate = this->getOrCreateFirstUnconnectedGate("out", 0, false, true);
@@ -508,7 +557,14 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
     double value = invMsg->getValue();
 
     // Find route to destination
-    std::vector<std::string> path = this->dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+    std::vector<std::string> path;
+    if (myName == "node-1") {
+        // Use attack route for attacker
+        path = baseMsg->getHops();
+    } else {
+        // Use shortest path for normal payments
+        path = this->dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+    }
     std::string firstHop = path[1];
 
     // If payment is larger than our capacity in the outbound payment channel, mark is as canceled and return
@@ -625,8 +681,8 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
           expiryMsg->setHops(path);
           
           // Schedule failure after 500ms
-          scheduleAt(simTime() + SimTime(5000, SIMTIME_MS), expiryMsg);
-          EV << "Attacker scheduled HTLC timeout for payment hash " << paymentHash << " at t=" << (simTime() + SimTime(5000, SIMTIME_MS)) << "\n";
+          scheduleAt(simTime() + SimTime(500000, SIMTIME_MS), expiryMsg);
+          EV << "Attacker scheduled HTLC timeout for payment hash " << paymentHash << " at t=" << (simTime() + SimTime(500000, SIMTIME_MS)) << "\n";
         }
 
         // If I'm the destination, trigger commit immediately and return
