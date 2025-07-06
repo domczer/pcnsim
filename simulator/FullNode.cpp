@@ -161,10 +161,10 @@ void FullNode::initialize() {
 
          // If this is the attacker payment, send it max_concurrent_htlc times
          if (srcName == "node-1" && myName == "node-2") {
-             int maxHTLCs = 2; //fallback
-            //  if (_paymentChannels.find("node-1") != _paymentChannels.end()) {
-            //      maxHTLCs = _paymentChannels["node-1"].getMaxAcceptedHTLCs();
-            //  }
+             int maxHTLCs = 30; //fallback
+             if (_paymentChannels.find("node-1") != _paymentChannels.end()) {
+                 maxHTLCs = _paymentChannels["node-1"].getMaxAcceptedHTLCs();
+             }
              for (int i = 0; i < maxHTLCs; ++i) {
                  char msgname[100];
                  sprintf(msgname, "%s-to-%s;attack-%d;value:%0.1f", srcName.c_str(), myName.c_str(), i, value);
@@ -441,10 +441,10 @@ void FullNode::initHandler (BaseMessage *baseMsg) {
             return;
         }
         std::string firstHop = attackRoute[1];
-        int maxHTLCs = 2; // fallback
-        // if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
-        //     maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
-        // }
+        int maxHTLCs = 30; // fallback
+        if (_paymentChannels.find(firstHop) != _paymentChannels.end()) {
+            maxHTLCs = _paymentChannels[firstHop].getMaxAcceptedHTLCs();
+        }
         EV << "Attacker initializing " << maxHTLCs << " unresolved HTLCs.\n";
         for (int i = 0; i < maxHTLCs; ++i) {
             // Generate a unique preimage and hash for each HTLC, but do not store preimage for fulfillment
@@ -623,7 +623,6 @@ void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
           expiryMsg->addPar("paymentHash") = paymentHash.c_str();
           expiryMsg->addPar("source") = sender.c_str();
           expiryMsg->setHops(path);
-          // expiryMsg->setSource(sender.c_str());
           
           // Schedule failure after 500ms
           scheduleAt(simTime() + SimTime(5000, SIMTIME_MS), expiryMsg);
@@ -1513,10 +1512,19 @@ bool FullNode::hasHTLCSlotsToForward(std::string nodeName) {
     // Helper function that checks if the payment channel has available HTLC slots to forward a payment.
 
     int maxHTLCs = _paymentChannels[nodeName].getMaxAcceptedHTLCs();
-    int inFlightHTLCs = _paymentChannels[nodeName].getnumHTLCs();
+    int myInFlightHTLCs = _paymentChannels[nodeName].getnumHTLCs();
+
+    
+    // Get the neighbor's channel to us
+    std::string myName = getName();
+    FullNode* neighborNode = check_and_cast<FullNode*>(getParentModule()->getSubmodule(nodeName.c_str()));
+    int neighborInFlightHTLCs = neighborNode->_paymentChannels[myName].getnumHTLCs();
+    
+    // Total HTLCs is sum of both directions
+    int totalHTLCs = myInFlightHTLCs + neighborInFlightHTLCs;
 
     // If the number of in-flight HTLCs is less than the maximum allowed, we can forward
-    if (inFlightHTLCs < maxHTLCs)
+    if (totalHTLCs < maxHTLCs)
         return true;
     else
         return false;
