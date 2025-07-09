@@ -64,6 +64,11 @@ class FullNode : public cSimpleModule {
         virtual std::vector <HTLC *> getSortedPendingHTLCs (std::vector<HTLC *> HTLCs, std::string neighbor);
         virtual std::string createHTLCId (std::string paymentHash, int htlcType);
 
+        // Landmark routing functions
+        virtual void selectLandmarks();
+        virtual void buildLandmarkPaths();
+        virtual std::vector<std::string> findPathViaLandmarks(std::string src, std::string dst);
+
     public:
         // Public data structures
         bool _isFirstSelfMessage;
@@ -81,6 +86,10 @@ class FullNode : public cSimpleModule {
         double _paymentGoodputSent = 0;
         double _paymentGoodputAll = 0;
 
+        // Landmark routing related variables
+        std::vector<std::string> landmarks;
+        std::map<std::string, std::vector<std::string>> _landmarkPaths;
+        std::map<std::string, std::map<std::string, std::vector<std::string>>> _nodeToLandmarkPaths;
 };
 
 // Define module and initialize random number generator
@@ -91,12 +100,19 @@ Define_Module(FullNode);
 /***********************************************************************************************************************/
 
 void FullNode::initialize() {
-
     // Get name (id) and initialize local topology based on the global topology created by netBuilder
     _localTopology = globalTopology;
     this->localCommitCounter = 0;
     std::string myName = getName();
     std::map<std::string, std::vector<std::tuple<std::string, double, simtime_t>>> localPendingPayments = pendingPayments;
+
+    // Initialize landmark routing if this is the first node
+    if (landmarks.empty()) {
+        selectLandmarks();
+    }
+
+    // Build paths to landmarks
+    buildLandmarkPaths();
 
     // Initialize payment channels
     for (auto& neighborToPCs : nameToPCs[myName]) {
@@ -406,28 +422,35 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
     std::string htlcId = createHTLCId(paymentHash, htlcType);
     double value = invMsg->getValue();
 
-    // Find route to destination
-    std::vector<std::string> path = this->dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+    // Find route to destination based on routing method
+    std::vector<std::string> path;
+    if (ENABLE_LANDMARK_ROUTING) {
+        path = this->findPathViaLandmarks(myName, dstName);
+        EV << "Using landmark routing to find path.\n";
+    } else {
+        path = this->dijkstraWeightedShortestPath(myName, dstName, adjMatrix);
+        EV << "Using Dijkstra's algorithm to find path.\n";
+    }
     std::string firstHop = path[1];
 
     // If payment is larger than our capacity in the outbound payment channel, mark is as canceled and return
-   if (!hasCapacityToForward(firstHop, value)) {
-       _myPayments[paymentHash] = "CANCELED";
-       EV << "WARNING: Canceling payment " + paymentHash + " on node " + myName + " due to insufficient funds in the first hop.\n";
+    if (!hasCapacityToForward(firstHop, value)) {
+        _myPayments[paymentHash] = "CANCELED";
+        EV << "WARNING: Canceling payment " + paymentHash + " on node " + myName + " due to insufficient funds in the first hop.\n";
 
-       _countCanceled++;
-       _paymentGoodputAll = double(_countCompleted)/double(_countCompleted + _countFailed + _countCanceled);
+        _countCanceled++;
+        _paymentGoodputAll = double(_countCompleted)/double(_countCompleted + _countFailed + _countCanceled);
 
-       emit(_signals["canceledPayments"], _countCanceled);
-       emit(_signals["paymentGoodputAll"], _paymentGoodputAll);
+        emit(_signals["canceledPayments"], _countCanceled);
+        emit(_signals["paymentGoodputAll"], _paymentGoodputAll);
 
-       return;
-   }
+        return;
+    }
 
-   // Add payment into payment list and set status = pending
-   _myPayments[paymentHash] = "PENDING";
+    // Add payment into payment list and set status = pending
+    _myPayments[paymentHash] = "PENDING";
 
-   // Print route
+    // Print route
     std::string printPath = "Full route to destination: ";
     for (auto hop: path)
         printPath = printPath + hop + ", ";
@@ -461,7 +484,6 @@ void FullNode::invoiceHandler (BaseMessage *baseMsg) {
     //Sending HTLC out
     EV << "Sending HTLC to " + firstHop + " with payment hash " + paymentHash + "\n";
     send(newMessage, gate);
-
 }
 
 void FullNode::updateAddHTLCHandler (BaseMessage *baseMsg) {
@@ -1465,4 +1487,169 @@ std::vector <HTLC *> FullNode::getSortedPendingHTLCs (std::vector<HTLC *> HTLCs,
 
 std::string FullNode::createHTLCId (std::string paymentHash, int htlcType) {
     return paymentHash + ":" + std::to_string(htlcType);
+}
+
+/***********************************************************************************************************************/
+/* LANDMARK ROUTING FUNCTIONS                                                                                         */
+/***********************************************************************************************************************/
+
+void FullNode::selectLandmarks() {
+    // This function selects landmark nodes based on the configured selection method
+    EV << "Selecting landmark nodes...\n";
+
+    if (LANDMARK_SELECTION == LANDMARKSELECT_RANDOM) {
+        // Random selection of landmarks
+        std::vector<std::string> allNodes;
+        for (const auto& entry : adjMatrix) {
+            allNodes.push_back(entry.first);
+        }
+
+        // Shuffle and select first NUM_LANDMARKS nodes
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(allNodes.begin(), allNodes.end(), g);
+
+        for (int i = 0; i < std::min(NUM_LANDMARKS, (int)allNodes.size()); i++) {
+            landmarks.push_back(allNodes[i]);
+            EV << "Selected landmark: " << allNodes[i] << "\n";
+        }
+    }
+    else if (LANDMARK_SELECTION == LANDMARKSELECT_HIGHESTDEGREE) {
+        // Select landmarks based on node degree (connectivity)
+        std::vector<std::pair<std::string, int>> nodesByDegree;
+
+        for (const auto& entry : adjMatrix) {
+            std::string nodeName = entry.first;
+            int degree = entry.second.size();
+            nodesByDegree.push_back(std::make_pair(nodeName, degree));
+        }
+
+        // Sort by degree (descending)
+        std::sort(nodesByDegree.begin(), nodesByDegree.end(),
+                 [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
+                     return a.second > b.second;
+                 });
+
+        // Select top NUM_LANDMARKS nodes
+        for (int i = 0; i < std::min(NUM_LANDMARKS, (int)nodesByDegree.size()); i++) {
+            landmarks.push_back(nodesByDegree[i].first);
+            EV << "Selected landmark: " << nodesByDegree[i].first << " with degree " << nodesByDegree[i].second << "\n";
+        }
+    }
+}
+
+void FullNode::buildLandmarkPaths() {
+    // Compute shortest paths from this node to all landmarks
+    std::string myName = getName();
+
+    EV << "Building landmark paths for node " << myName << "\n";
+
+    // Clear existing landmark paths
+    _landmarkPaths.clear();
+    _nodeToLandmarkPaths.clear();
+
+    // Step 1: Compute paths to all landmarks from this node
+    for (const auto& landmark : landmarks) {
+        if (landmark != myName) {
+            // Compute path from this node to each landmark using Dijkstra
+            std::vector<std::string> path = dijkstraWeightedShortestPath(myName, landmark, adjMatrix);
+            _landmarkPaths[landmark] = path;
+
+            EV << "Path to landmark " << landmark << ": ";
+            for (const auto& hop : path) {
+                EV << hop << " ";
+            }
+            EV << "\n";
+        }
+    }
+
+    // Step 2: For each node in the network, compute paths via each landmark
+    for (const auto& entry : adjMatrix) {
+        std::string nodeName = entry.first;
+
+        if (nodeName != myName) {
+            _nodeToLandmarkPaths[nodeName] = std::map<std::string, std::vector<std::string>>();
+
+            // Direct path first (no landmark)
+            std::vector<std::string> directPath = dijkstraWeightedShortestPath(myName, nodeName, adjMatrix);
+
+            // Try all landmarks
+            for (const auto& landmark : landmarks) {
+                if (landmark != myName && landmark != nodeName) {
+                    // Get path from this node to landmark (already precomputed)
+                    std::vector<std::string> pathToLandmark = _landmarkPaths[landmark];
+
+                    // Get path from landmark to destination
+                    std::vector<std::string> pathFromLandmark = dijkstraWeightedShortestPath(landmark, nodeName, adjMatrix);
+
+                    // Combine paths (remove duplicate landmark node)
+                    std::vector<std::string> fullPath = pathToLandmark;
+                    fullPath.insert(fullPath.end(), pathFromLandmark.begin() + 1, pathFromLandmark.end());
+
+                    // Store the combined path
+                    _nodeToLandmarkPaths[nodeName][landmark] = fullPath;
+
+                    EV << "Path to " << nodeName << " via landmark " << landmark << ": ";
+                    for (const auto& hop : fullPath) {
+                        EV << hop << " ";
+                    }
+                    EV << " (length: " << fullPath.size()-1 << ")\n";
+                }
+            }
+        }
+    }
+}
+
+// Method removed in favor of using precomputed paths in findPathViaLandmarks
+
+std::vector<std::string> FullNode::findPathViaLandmarks(std::string src, std::string dst) {
+    // Find a path from src to dst using landmark routing with precomputed paths
+    std::string myName = getName();
+
+    // If src and dst are the same, return just the node itself
+    if (src == dst) {
+        return {src};
+    }
+
+    // Direct path case - if we're finding a path from ourselves
+    if (src == myName) {
+        // Check if we have a direct path to the destination from Dijkstra
+        std::vector<std::string> directPath = dijkstraWeightedShortestPath(src, dst, adjMatrix);
+        int directPathLength = directPath.size() - 1;
+
+        // Try all landmarks to see if there's a shorter path
+        std::string bestLandmark = "";
+        int shortestPathLength = directPathLength;
+        std::vector<std::string> bestPath = directPath;
+
+        for (const auto& landmark : landmarks) {
+            if (landmark != src && landmark != dst && _landmarkPaths.count(landmark) > 0) {
+                // We have a precomputed path to this landmark
+                if (_nodeToLandmarkPaths.count(dst) > 0 && _nodeToLandmarkPaths[dst].count(landmark) > 0) {
+                    // We have a precomputed path from ourselves to dst via this landmark
+                    std::vector<std::string> landmarkPath = _nodeToLandmarkPaths[dst][landmark];
+                    int landmarkPathLength = landmarkPath.size() - 1;
+
+                    if (landmarkPathLength < shortestPathLength) {
+                        shortestPathLength = landmarkPathLength;
+                        bestLandmark = landmark;
+                        bestPath = landmarkPath;
+                    }
+                }
+            }
+        }
+
+        if (!bestLandmark.empty()) {
+            EV << "Routing from " << src << " to " << dst << " via landmark " << bestLandmark << " using precomputed path\n";
+            return bestPath;
+        } else {
+            EV << "Using direct path from " << src << " to " << dst << "\n";
+            return directPath;
+        }
+    } else {
+        // We're being asked about routing between two other nodes
+        // Just use Dijkstra as fallback since we don't store other nodes' landmark paths
+        EV << "Using direct path from " << src << " to " << dst << " (not originating from this node)\n";
+        return dijkstraWeightedShortestPath(src, dst, adjMatrix);
+    }
 }
