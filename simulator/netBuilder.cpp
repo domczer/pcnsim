@@ -1,10 +1,14 @@
 #include "globals.h"
 #include <algorithm>
+#include <omnetpp.h>
+
+using namespace omnetpp;
 
 cTopology *globalTopology = new cTopology("globalTopology");
 std::map< std::string, std::vector< std::tuple<std::string, double, simtime_t> > > pendingPayments;
 std::map< std::string, std::map<std::string, std::tuple<double, double, double, int, double, double, cGate*, cGate*> > > nameToPCs;
 std::map< std::string, std::vector< std::pair<std::string, std::vector<double> > > > adjMatrix;
+std::vector<std::string> landmarks; // Initialize global landmarks vector
 
 class NetBuilder : public cSimpleModule {
     public:
