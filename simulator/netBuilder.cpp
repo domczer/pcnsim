@@ -1,6 +1,7 @@
 #include "globals.h"
 #include <algorithm>
 #include <omnetpp.h>
+#include <random>
 
 using namespace omnetpp;
 
@@ -18,6 +19,7 @@ class NetBuilder : public cSimpleModule {
         void initWorkload();
         void connect(cGate *src, cGate *dst, double linkDelay);
         bool nodeExists(std::map<int, cModule*> nodeList, int nodeId);
+        void selectGlobalLandmarks();
 };
 
 Define_Module(NetBuilder);
@@ -87,6 +89,56 @@ void NetBuilder::initWorkload() {
         pendingPayments[dstName].push_back(paymentTuple);
     }
 
+}
+
+void NetBuilder::selectGlobalLandmarks() {
+    // This function selects landmark nodes globally based on degree centrality (highest connectivity)
+    EV << "Selecting global landmark nodes based on degree centrality...\n";
+
+    // Clear any existing landmarks
+    landmarks.clear();
+
+    if (LANDMARK_SELECTION == LANDMARKSELECT_RANDOM) {
+        // Random selection of landmarks
+        std::vector<std::string> allNodes;
+        for (const auto& entry : adjMatrix) {
+            allNodes.push_back(entry.first);
+        }
+
+        // Shuffle and select first NUM_LANDMARKS nodes
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(allNodes.begin(), allNodes.end(), g);
+
+        for (int i = 0; i < std::min(NUM_LANDMARKS, (int)allNodes.size()); i++) {
+            landmarks.push_back(allNodes[i]);
+            EV << "Selected landmark: " << allNodes[i] << "\n";
+        }
+    }
+    else if (LANDMARK_SELECTION == LANDMARKSELECT_HIGHESTDEGREE) {
+        // Select landmarks based on node degree (connectivity)
+        std::vector<std::pair<std::string, int>> nodesByDegree;
+
+        for (const auto& entry : adjMatrix) {
+            std::string nodeName = entry.first;
+            int degree = entry.second.size();
+            nodesByDegree.push_back(std::make_pair(nodeName, degree));
+        }
+
+        // Sort by degree (descending)
+        std::sort(nodesByDegree.begin(), nodesByDegree.end(),
+                 [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) {
+                     return a.second > b.second;
+                 });
+
+        // Select top NUM_LANDMARKS nodes
+        for (int i = 0; i < std::min(NUM_LANDMARKS, (int)nodesByDegree.size()); i++) {
+            landmarks.push_back(nodesByDegree[i].first);
+            EV << "Selected global landmark: " << nodesByDegree[i].first << " with degree " << nodesByDegree[i].second << "\n";
+        }
+    }
+
+    EV << "Global landmark selection complete. Selected " << landmarks.size() << " landmarks.\n";
 }
 
 void NetBuilder::buildNetwork(cModule *parent) {
@@ -202,6 +254,9 @@ void NetBuilder::buildNetwork(cModule *parent) {
         cGate *dstGate = std::get<2>(linkTuple);
         globalTopology->addLink(link, srcGate, dstGate);
     }
+
+    // Select global landmarks based on degree centrality
+    selectGlobalLandmarks();
 
     // Initialize modules
     bool more = true;
