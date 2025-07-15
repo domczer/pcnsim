@@ -3,8 +3,11 @@ simple FullNode
     parameters:
         //@display("i=block/routing");
         @display("i=device/pc_s");
+        string role = default("honest");
+        double failureProbability = default(0.2);
+        string attackDestination = default("");
 
-		// Signals
+                // Signals
         @signal[node*-to-node*:capacity](type="double");
         @signal[completedPayments](type="int");
         @signal[failedPayments](type="int");
@@ -22,5 +25,4 @@ simple FullNode
 		
     gates:
         input in[];
-        output out[];
-}
+        output out[];}
